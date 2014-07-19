@@ -1,5 +1,7 @@
 module KernelTools
 
+export @loophoist, @tile, @test_looporder
+
 if VERSION.minor < 3
     using Cartesian
 else
@@ -7,5 +9,6 @@ else
 end
 
 include("edge.jl")
+include("macros.jl")
 
 end # module
