@@ -297,6 +297,8 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
         end
         # Replace the body indexing to be tile-specific
         bodymod.args[2] = tileindex(bodymod.args[2], loopvars, outervars, innervars, tmpnames, offsetsyms)
+    else
+        bodymod.args[2] = tileindex(bodymod.args[2], loopvars, outervars, innervars, Symbol[], [])
     end
     # Create the outer loop nest and modify the inner loop nest to just iterate over a tile
     loopranges = Expr[]
