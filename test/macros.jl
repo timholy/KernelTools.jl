@@ -101,3 +101,52 @@ offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i
 @test stripexpr(stmnts[3]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 @test stripexpr(stmnts[4]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 
+A = rand(3,5)
+A1 = sum(A, 2)
+A2 = sum(A, 1)
+A1c = similar(A1); fill!(A1c, 0)
+A2c = similar(A2); fill!(A2c, 0)
+KernelTools.@loophoist for j = 1:size(A,2), i = 1:size(A,1)
+    A1c[i,1] += A[i,j]
+end
+KernelTools.@loophoist for j = 1:size(A,2), i = 1:size(A,1)
+    A2c[1,j] += A[i,j]
+end
+@test A1c == A1
+@test A2c == A2
+
+M = 8
+K = 9
+N = 7
+A = rand(M,K)
+B = rand(K,N)
+C = A*B
+Cc = similar(C)
+fill!(Cc, 0)
+KernelTools.@tile (m,4,k,4,n,4) begin
+    for n = 1:N, k = 1:K, m = 1:M
+        Cc[m,n] += A[m,k] * B[k,n]
+    end
+end
+@test_approx_eq C Cc
+fill!(Cc, 0)
+KernelTools.@tile (m,4,k,4,n,4) begin
+    KernelTools.@loophoist for n = 1:N,  k = 1:K, m = 1:M
+        Cc[m,n] += A[m,k] * B[k,n]
+    end
+end
+@test_approx_eq C Cc
+fill!(Cc, 0)
+KernelTools.@tile (m,4,k,4,n,4) (Bt[n,k] = B[k,n]) begin
+    for n = 1:N,  k = 1:K, m = 1:M
+        Cc[m,n] += A[m,k] * Bt[n,k]
+    end
+end
+@test_approx_eq C Cc
+fill!(Cc, 0)
+KernelTools.@tile (m,4,k,4,n,4) (Bt[n,k] = B[k,n]) begin
+    KernelTools.@loophoist for n = 1:N,  k = 1:K, m = 1:M
+        Cc[m,n] += A[m,k] * Bt[n,k]
+    end
+end
+@test_approx_eq C Cc

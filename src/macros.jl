@@ -188,6 +188,9 @@ end
 ### Tiling ###
 
 macro tile(tilevariables, args...)
+    _tile(tilevariables, args...)
+end
+function _tile(tilevariables, args...)
     if length(args) == 2
         pre = args[1]
         body = args[2]
@@ -227,6 +230,7 @@ macro tile(tilevariables, args...)
     end
 end
 
+# Thoughts: should use more Dicts to make this easier?
 function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     initblocks = Any[]  # These will allocate temporaries used on a per-tile basis
     preblocks = Any[]   # These run at the beginning of working on each tile
@@ -237,8 +241,18 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     if bodymod.head == :block
         bodymod = Base.is_linenumber(bodymod.args[1]) ? bodymod.args[2] : bodymod.args[1]
     end
-    if bodymod.head == :macrocall && bodymod.args[1] == symbol("@loophoist")
+    if (bodymod.head == :macrocall && bodymod.args[1] == symbol("@loophoist")) || is_quoted_macrocall(bodymod.args[1], :KernelTools, symbol("@loophoist"))
         bodymod = bodymod.args[2]
+    end
+    @assert bodymod.head == :for
+    looprangeexpr = bodymod.args[1]
+    looprangedict = Dict{Symbol,Expr}()
+    if looprangeexpr.head == :block
+        for ex in looprangeexpr.args
+            looprangedict[ex.args[1]] = ex.args[2]
+        end
+    else
+        looprangedict[looprangeexpr.args[1]] = looprangeexpr.args[2]
     end
     # Handle any tilewise temporaries
     if pre != nothing
@@ -292,8 +306,8 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
             keep = indexin(loopvars, lv) .> 0
             sum(keep) == length(lv) || error("Pre expressions must use the same indexing variables as the overall loop")
             lv, ov, iv = loopvars[keep], outervars[keep], innervars[keep]
-            loopranges = [:($(iv[d]) = 1-$(osyms[d]):$(ssyms[d])-$(osyms[d])) for d = 1:length(iv)]
-            push!(preblocks, Expr(:for, loopranges, tileindex(esc(ex), lv, ov, iv, tmpnames, offsetsyms)))
+            loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), last($(looprangedict[lv[d]]))-$(ov[d])))) for d = 1:length(iv)]
+            push!(preblocks, Expr(:for, Expr(:block, loopranges...), tileindex(esc(ex), lv, ov, iv, tmpnames, offsetsyms)))
         end
         # Replace the body indexing to be tile-specific
         bodymod.args[2] = tileindex(bodymod.args[2], loopvars, outervars, innervars, tmpnames, offsetsyms)
@@ -455,13 +469,11 @@ end
 # else is based on the position (i.e., index) within outervars/innervars/offsetsyms.
 function tileindex(ex::Expr, loopvars, outervars, innervars, tmpnames, offsetsyms)
     domainexprs = [:($(outervars[i]) + $(innervars[i]))  for i = 1:length(loopvars)]
-    tileindex!(copy(ex), loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+    exout = tileindex!(copy(ex), loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+    exout
 end
 
 function tileindex!(ex::Expr, loopvars, domainexprs, innervars, tmpnames, offsetsyms)
-    for i = 1:length(ex.args)
-        tileindex!(ex.args[i], loopvars, domainexprs, innervars, tmpnames, offsetsyms)
-    end
     if ex.head == :ref
         sym = ex.args[1]
         ind = indexin_scalar(sym, tmpnames)
@@ -476,9 +488,17 @@ function tileindex!(ex::Expr, loopvars, domainexprs, innervars, tmpnames, offset
             end
         end
     end
+    for i = 1:length(ex.args)
+        if isa(ex.args[i], Expr)
+            tileindex!(ex.args[i]::Expr, loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+        elseif isa(ex.args[i], Symbol)
+            s = ex.args[i]::Symbol
+            ind = indexin_scalar(s, loopvars)
+            ex.args[i] = ind > 0 ? domainexprs[ind] : s
+        end
+    end
     ex
 end
-tileindex!(s, loopvars, domainexprs, innervars, tmpnames, offsetsyms) = s
 
 function replaceindex!(s::Symbol, loopvars, replacevars)
     ind = indexin_scalar(s, loopvars)
@@ -513,6 +533,14 @@ function tilerange(outersym, tilesizesym, rng::Expr)
     length(rng.args) == 2 || error("Sorry, step size not yet supported")
     esc(:($outersym = first($rng):$tilesizesym:last($rng)))
 end
+
+is_quoted_macrocall(a, modulename, sym::Symbol) = false
+function is_quoted_macrocall(ex::Expr, modulename, sym::Symbol)
+    ex.head == :. && ex.args[1] == modulename &&
+        ((isa(ex.args[2], QuoteNode) && (ex.args[2]::QuoteNode).value == sym) ||
+         (isa(ex.args[2], Expr) && (ex.args[2]::Expr).head == :quote && (ex.args[2]::Expr).args[1] == sym))
+end
+
 
 # Constant-folding for parsing indexes
 # Parse indexing expressions like A[2k+1] to extract the coefficient (2), symbol (:k), and offset (1)
