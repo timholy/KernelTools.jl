@@ -11,7 +11,7 @@ using Base.Test
 # of an expression, and can't elide the container expression itself.
 function stripexpr(a)
     ex = stripexpr!(copy(a))
-    if isa(ex, Expr) && ex.head == :block && length(ex.args) == 1
+    if isa(ex, Expr) && (ex.head == :block || ex.head == :escape) && length(ex.args) == 1
         return ex.args[1]
     end
     ex
@@ -19,12 +19,8 @@ end
 
 stripexpr!(a) = a
 function stripexpr!(ex::Expr)
-    nargs = length(ex.args)
     # Strip line number statements
-    keep = trues(nargs)
-    for i = 1:nargs
-        keep[i] = Base.is_linenumber(ex.args[i])
-    end
+    keep = ![Base.is_linenumber(ex.args[i]) for i = 1:length(ex.args)]
     ex.args = ex.args[keep]
     # Eliminate :escape and unnecessary :block statements
     nargs = length(ex.args)
@@ -85,23 +81,23 @@ ex = KernelTools.gen_hoisted(:(s += A[j]), [:j, :i], [:(1:size(A,2)),:(1:size(A,
 # A[i]
 stmnts = Any[]
 offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti])
-@test stmnts[1] == :($(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
-@test stmnts[2] == :($(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
+@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
+@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
 # A[i-1]
 stmnts = Any[]
 offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti])
-@test stmnts[1] == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
-@test stmnts[2] == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
+@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
+@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
 # A[i-1] and A[i+1]
 stmnts = Any[]
 offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti])
-@test stmnts[1] == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
-@test stmnts[2] == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
+@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
+@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
 # A[i+1,j] and A[i,j+1]
 stmnts = Any[]
 offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj])
-@test stmnts[1] == :($(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
-@test stmnts[2] == :($(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
-@test stmnts[3] == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
-@test stmnts[4] == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
+@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
+@test stripexpr(stmnts[3]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[4]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 
