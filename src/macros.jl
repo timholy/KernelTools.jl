@@ -308,7 +308,7 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
             j = ind[1]
             rng = looprangeexprs[j].args[2]
             push!(loopranges, tilerange(outervars[i], tilesizesym[i], rng))
-            looprangeexprs[j] = :($(innervars[i]) = 0:$(tilesizesym[i])-1)
+            looprangeexprs[j] = :($(innervars[i]) = 0:min($(tilesizesym[i])-1,last($rng)-$(outervars[i])))
         end
     else
         push!(loopranges, tilerange(outervars[1], tilesizesym[1], bodymod[1].args[1]))
