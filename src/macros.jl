@@ -187,10 +187,10 @@ end
 
 ### Tiling ###
 
-macro tile(tilevariables, args...)
-    _tile(tilevariables, args...)
+macro tile(tilesettings, args...)
+    _tile(tilesettings, args...)
 end
-function _tile(tilevariables, args...)
+function _tile(tilesettings, args...)
     if length(args) == 2
         pre = args[1]
         body = args[2]
@@ -202,22 +202,21 @@ function _tile(tilevariables, args...)
     tilevars = Symbol[]
     tilesize = Int[]
     k = 1
-    (isa(tilevariables, Expr) && tilevariables.head == :tuple) || error("First argument must be a tuple-expression")
-    tilevariables = tilevariables.args
-    while k < length(tilevariables)
-        isa(tilevariables[k], Symbol) || error("error parsing tilevariables")
-        push!(loopvars, tilevariables[k])
+    (isa(tilesettings, Expr) && tilesettings.head == :tuple) || error("First argument must be a tuple-expression")
+    while k < length(tilesettings.args)
+        isa(tilesettings.args[k], Symbol) || error("error parsing tilesettings")
+        push!(loopvars, tilesettings.args[k])
         k += 1
-        if isa(tilevariables[k], Int)
+        if isa(tilesettings.args[k], Int)
             tv = symbol("_kt_outer_"*string(loopvars[end]))
-        elseif isa(tilevariables[k], Symbol)
-            tv = tilevariables[k]
+        elseif isa(tilesettings.args[k], Symbol)
+            tv = tilesettings.args[k]
             k += 1
         else
-            error("error parsing tilevariables")
+            error("error parsing tilesettings")
         end
         push!(tilevars, tv)
-        push!(tilesize, tilevariables[k])
+        push!(tilesize, tilesettings.args[k])
         k += 1
     end
     tilesizesym = [symbol("_kt_tsz_"*string(lv)) for lv in loopvars]
