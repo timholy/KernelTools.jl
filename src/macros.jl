@@ -246,7 +246,7 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     if bodymod.head == :block
         bodymod = Base.is_linenumber(bodymod.args[1]) ? bodymod.args[2] : bodymod.args[1]
     end
-    if (bodymod.head == :macrocall && bodymod.args[1] == symbol("@loophoist")) || is_quoted_macrocall(bodymod.args[1], :KernelTools, symbol("@loophoist"))
+    if is_macrocall(bodymod, :KernelTools, symbol("@loophoist"))
         bodymod = bodymod.args[2]
     end
     @assert bodymod.head == :for
@@ -535,11 +535,18 @@ function tilerange(outersym, tilesizesym, rng::Expr)
     esc(:($outersym = first($rng):$tilesizesym:last($rng)))
 end
 
-is_quoted_macrocall(a, modulename, sym::Symbol) = false
-function is_quoted_macrocall(ex::Expr, modulename, sym::Symbol)
-    ex.head == :. && ex.args[1] == modulename &&
-        ((isa(ex.args[2], QuoteNode) && (ex.args[2]::QuoteNode).value == sym) ||
-         (isa(ex.args[2], Expr) && (ex.args[2]::Expr).head == :quote && (ex.args[2]::Expr).args[1] == sym))
+is_macrocall(a, modulename, sym::Symbol) = false
+function is_macrocall(ex::Expr, modulename, sym::Symbol)
+    if ex.head == :macrocall
+        ex.args[1] == sym && return true
+        if isa(ex.args[1], Expr)
+            ex = ex.args[1]::Expr
+            return ex.head == :. && ex.args[1] == modulename &&
+                ((isa(ex.args[2], QuoteNode) && (ex.args[2]::QuoteNode).value == sym) ||
+                 (isa(ex.args[2], Expr) && (ex.args[2]::Expr).head == :quote && (ex.args[2]::Expr).args[1] == sym))
+        end
+    end
+    false
 end
 
 
