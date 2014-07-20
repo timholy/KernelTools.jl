@@ -80,26 +80,26 @@ ex = KernelTools.gen_hoisted(:(s += A[j]), [:j, :i], [:(1:size(A,2)),:(1:size(A,
     # compute the offset and size of A needed to be able to execute all indexing statements without bounds errors
 # A[i]
 stmnts = Any[]
-offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti])
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
 # A[i-1]
 stmnts = Any[]
-offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti])
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
 # A[i-1] and A[i+1]
 stmnts = Any[]
-offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti])
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
 # A[i+1,j] and A[i,j+1]
 stmnts = Any[]
-offsetsyms, sizesyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj])
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
-@test stripexpr(stmnts[3]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
-@test stripexpr(stmnts[4]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[4]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[5]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 
 A = rand(3,5)
 A1 = sum(A, 2)
@@ -122,6 +122,7 @@ A = rand(M,K)
 B = rand(K,N)
 C = A*B
 Cc = similar(C)
+# Tiling with just a body expression
 fill!(Cc, 0)
 KernelTools.@tile (m,4,k,4,n,4) begin
     for n = 1:N, k = 1:K, m = 1:M
@@ -136,6 +137,7 @@ KernelTools.@tile (m,4,k,4,n,4) begin
     end
 end
 @test_approx_eq C Cc
+# Tiling with a pre-expression
 fill!(Cc, 0)
 KernelTools.@tile (m,4,k,4,n,4) (Bt[n,k] = B[k,n]) begin
     for n = 1:N,  k = 1:K, m = 1:M
@@ -150,3 +152,25 @@ KernelTools.@tile (m,4,k,4,n,4) (Bt[n,k] = B[k,n]) begin
     end
 end
 @test_approx_eq C Cc
+# Don't tile over m
+fill!(Cc, 0)
+KernelTools.@tile (k,4,n,4) (Bt[n,k] = B[k,n]) begin
+    KernelTools.@loophoist for n = 1:N,  k = 1:K, m = 1:M
+        Cc[m,n] += A[m,k] * Bt[n,k]
+    end
+end
+@test_approx_eq C Cc
+
+# Image blur
+A = rand(7,8)
+blur_xy = similar(A)
+interior_x, interior_y = 2:size(A,1)-1, 2:size(A,2)-1
+KernelTools.@tile (x,4,y,4) (blur_y[x,y] = A[x,y-1]+A[x,y]+A[x,y+1]) begin
+    for y = interior_y, x = interior_x
+        blur_xy[x,y] = (1.0/9)*(blur_y[x-1,y] + blur_y[x,y] + blur_y[x+1,y])
+    end
+end
+Ab = (A[interior_x, interior_y] + A[interior_x-1, interior_y] + A[interior_x+1, interior_y] +
+      A[interior_x, interior_y-1] + A[interior_x-1, interior_y-1] + A[interior_x+1, interior_y-1] +
+      A[interior_x, interior_y+1] + A[interior_x-1, interior_y+1] + A[interior_x+1, interior_y+1])/9
+@test_approx_eq blur_xy[interior_x, interior_y] Ab
