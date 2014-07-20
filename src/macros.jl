@@ -292,8 +292,9 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
         for (i,Asym) in enumerate(tmpnames)
             # Find the first statement in pre that defines each temporary
             ex, _ = assignmentexpr(pre, Asym)
-            # Change all indexes on the RHS to 1
-            ex1 = index1!(copy(ex.args[2]))
+            # Change all indexes on the RHS to offsets. This is a safe place to evaluate it
+            outfirst = [:(first($(looprangedict[lv]))) for lv in loopvars]
+            ex1 = tileindex(ex.args[2], loopvars, outfirst, zeros(Int, length(loopvars)), tmpnames, offsetsyms[i])
             push!(allocblock, esc(:($Asym = Array(typeof($ex1), $(sizesyms[i]...)))))
         end
         push!(initblocks, Expr(:block, esc(:(KT_ALLOC_BLOCK = 1)), allocblock...))
@@ -444,23 +445,6 @@ function refexprs!(refs, ex::Expr; skiplhs=false)
     refs
 end
 refexprs!(refs, s; skiplhs=false) = refs
-
-# Change all indexes to 1.
-# This is used for evaluation in the service of type inference
-function index1!(ex::Expr)
-    if ex.head == :ref
-        for i = 2:length(ex.args)
-            ex.args[i] = 1
-        end
-    else
-        for i = 1:length(ex.args)
-            if isa(ex.args, Expr)
-                index1!(ex.args[i]::Expr)
-            end
-        end
-    end
-    ex
-end
 
 # Convert untiled indexing statements to tiled indexing statements
 # For arrays that cover the whole domain, i -> i_outer + i_inner
