@@ -41,6 +41,12 @@
 # is supposed to a separate step? Make need @tile_thread? Or, any allocations that come
 # before the for loop could be interpreted as needing to be done once for each thread.
 
+const KT_DEBUG = Dict{Symbol, Any}()
+function showdebug(sym::Symbol, val)
+    global KT_DEBUG
+    KT_DEBUG[sym] = val
+end
+
 ### loop ordering & hoisting
 macro test_looporder(ex)
     loopVars, loopRanges = extract_loopvars(ex)
