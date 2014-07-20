@@ -346,20 +346,17 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
         bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, Symbol[], [])
     end
     # Create the outer loop nest and modify the inner loop nest to just iterate over a tile
-    loopranges = Expr[]
-    if length(loopvars) > 1
-        looprangeexprs = bodymod.args[1].args  # it's inside a :block statement
-        for (i,lv) in enumerate(loopvars)
-            ind = find(ex->ex.args[1] == lv, looprangeexprs)
-            @assert length(ind) == 1
-            j = ind[1]
-            rng = looprangeexprs[j].args[2]
-            push!(loopranges, tilerange(outervars[i], tilesizesym[i], rng))
-            looprangeexprs[j] = :($(innervars[i]) = 0:min($(tilesizesym[i])-1,last($rng)-$(outervars[i])))
+    outerlooprangeexprs = Expr[]
+    innerlooprangeexprs = bodymod.args[1].head == :block ? bodymod.args[1].args : [bodymod.args[1]]
+    for i = 1:length(innerlooprangeexprs)
+        ex = innerlooprangeexprs[i]
+        lv = ex.args[1]
+        ind = indexin_scalar(lv, tilevars)
+        if ind > 0
+            rng = looprangedict[lv]
+            push!(outerlooprangeexprs, tilerange(outervars[ind], tilesizesym[ind], rng))
+            innerlooprangeexprs[i] = :($(innervars[ind]) = 0:min($(tilesizesym[ind])-1,last($rng)-$(outervars[ind])))
         end
-    else
-        push!(loopranges, tilerange(outervars[1], tilesizesym[1], bodymod[1].args[1]))
-        bodymod.args[1] = esc(:($(innervars[1]) = 0:$(tilesizesym[1])-1))
     end
     # Create the final expression
     block = Any[]
