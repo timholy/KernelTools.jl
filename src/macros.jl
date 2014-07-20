@@ -42,10 +42,15 @@
 # before the for loop could be interpreted as needing to be done once for each thread.
 
 const KT_DEBUG = Dict{Symbol, Any}()
-function showdebug(sym::Symbol, val)
+function setdebug(sym::Symbol, val)
     global KT_DEBUG
     KT_DEBUG[sym] = val
 end
+# Recognized settings:
+#    :inferredbounds    Shows the sizes and offsets of temporaries
+#    :tileindex         Shows the current outer tile variable values
+#    :bodyindex         Shows (outer, inner) iteration variables in the body
+#    :preindex          Shows (outer, inner) iteration variables in the pre-expression(s)
 
 ### loop ordering & hoisting
 macro test_looporder(ex)
@@ -288,7 +293,7 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             arraysym = r.args[1]
             indexes = r.args[2:end]
             if !haskey(indexes_by_array, arraysym)
-                indexes_by_array[arraysym] = Vector{Vector{Any}}()
+                indexes_by_array[arraysym] = Vector{Any}[]
             end
             push!(indexes_by_array[arraysym], indexes)
         end
@@ -327,9 +332,11 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             push!(allocblock, esc(:($Asym = Array(typeof($ex1), $(sizesyms[i]...)))))
         end
         push!(initblocks, Expr(:block, esc(:(KT_ALLOC_BLOCK = 1)), allocblock...))
-        # In a tile, initialize each temporary
+        # Now we build code that will run inside the tile loops
+        # Initialize each temporary
         for (i,Asym) in enumerate(tmpnames)
-            ex, _ = assignmentexpr(pre, Asym)
+            # Here's a design problem: what about temporaries that take more than one line to compute?
+            ex, _ = assignmentexpr(pre, Asym)  # find the expression for calculating the chosen temporary
             osyms = offsetsyms[i]
             ssyms = sizesyms[i]
             lsyms = lastsyms[i]
@@ -338,14 +345,19 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             sum(keep) == length(tv) || error("Pre expressions must use the same indexing variables as the overall loop")
             tv, ov, iv = tilevars[keep], outervars[keep], innervars[keep]
             loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), $(lsyms[d])-$(ov[d])))) for d = 1:length(iv)]
-            push!(preblocks, Expr(:for, Expr(:block, loopranges...), tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)))
+            initbody = tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)
+            if get(KT_DEBUG, :preindex, false)
+                initbody = Expr(:block, esc(Expr(:macrocall, symbol("@show"), Expr(:tuple, iv...))), initbody)
+                push!(preblocks, :(println("Initializing ", $(Expr(:quote, Asym)))))
+            end
+            push!(preblocks, Expr(:for, Expr(:block, loopranges...), initbody))
         end
         # Replace the body indexing to be tile-specific
         bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, tmpnames, offsetsyms)
     else
         bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, Symbol[], [])
     end
-    # Create the outer loop nest and modify the inner loop nest to just iterate over a tile
+    # Create the outer loop nest and modify the inner loop nest to iterate over a tile
     outerlooprangeexprs = Expr[]
     innerlooprangeexprs = bodymod.args[1].head == :block ? bodymod.args[1].args : [bodymod.args[1]]
     for i = 1:length(innerlooprangeexprs)
@@ -363,7 +375,13 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
     if !isempty(initblocks)
         push!(block, initblocks...)
     end
+    if get(KT_DEBUG, :bodyindex, false)
+        unshift!(bodymod.args[2].args, Expr(:macrocall, symbol("@show"), Expr(:tuple, innervars...)))
+    end
     body = esc(body)
+    if get(KT_DEBUG, :tileindex, false)
+        unshift!(preblocks, esc(Expr(:macrocall, symbol("@show"), Expr(:tuple, outervars...))))
+    end
     if !isempty(preblocks)
         body = Expr(:block, Expr(:block, esc(:(KT_TILEWISE_BLOCK = 1)), preblocks...), body)
     end
@@ -404,7 +422,7 @@ function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, tilevars, til
     offsetsyms = Array(Symbol, nd)
     sizesyms = Array(Symbol, nd)
     lastsyms = Array(Symbol, nd)
-    toshow = get(KT_DEBUG, :bounds, false)
+    toshow = get(KT_DEBUG, :inferredbounds, false)
     for d = 1:nd
         tag = string(arrayname)*"_"*string(d)
         # The offset is computed in terms of the minimum value of all indexing operations
