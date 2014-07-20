@@ -246,7 +246,7 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     end
     @assert bodymod.head == :for
     looprangeexpr = bodymod.args[1]
-    looprangedict = Dict{Symbol,Expr}()
+    looprangedict = Dict{Symbol,Any}()
     if looprangeexpr.head == :block
         for ex in looprangeexpr.args
             looprangedict[ex.args[1]] = ex.args[2]
@@ -493,6 +493,7 @@ function tileindex!(ex::Expr, loopvars, domainexprs, innervars, tmpnames, offset
     ex
 end
 
+replaceindex!(arg, loopvars, replacevars) = arg
 function replaceindex!(s::Symbol, loopvars, replacevars)
     ind = indexin_scalar(s, loopvars)
     if ind > 0
@@ -506,12 +507,14 @@ function replaceindex!(ex::Expr, loopvars, replacevars)
     end
     ex
 end
+replaceindex!(arg, loopvars, replacevars, offset::Symbol) = arg
 function replaceindex!(s::Symbol, loopvars, replacevars, offset::Symbol)
     ind = indexin_scalar(s, loopvars)
     if ind > 0
         return :($(replacevars[ind]) + $offset)
     end
-    :($s + $offset)
+#     :($s + $offset)
+    s
 end
 function replaceindex!(ex::Expr, loopvars, replacevars, offset::Symbol)
     for i = 1:length(ex.args)
