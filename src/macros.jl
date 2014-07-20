@@ -204,89 +204,111 @@ function _tile(tilesettings, args...)
         pre = nothing
         body = args[1]
     end
-    loopvars = Symbol[]
-    tilevars = Symbol[]
-    tilesize = Int[]
+    tilevars = Symbol[]  # these are the variables we will be tiling over. Might be a subset of all loopvars.
+    outervars = Symbol[] # the names used for the outer variables (the tile indexes)
+    tilesize = Int[]     # the tile size (i.e., the step size for each outer variable)
     k = 1
     (isa(tilesettings, Expr) && tilesettings.head == :tuple) || error("First argument must be a tuple-expression")
     while k < length(tilesettings.args)
         isa(tilesettings.args[k], Symbol) || error("error parsing tilesettings")
-        push!(loopvars, tilesettings.args[k])
+        push!(tilevars, tilesettings.args[k])
         k += 1
         if isa(tilesettings.args[k], Int)
-            tv = symbol("_kt_outer_"*string(loopvars[end]))
+            tv = symbol("_kt_outer_"*string(tilevars[end]))
         elseif isa(tilesettings.args[k], Symbol)
             tv = tilesettings.args[k]
             k += 1
         else
             error("error parsing tilesettings")
         end
-        push!(tilevars, tv)
+        push!(outervars, tv)
         push!(tilesize, tilesettings.args[k])
         k += 1
     end
-    tilesizesym = [symbol("_kt_tsz_"*string(lv)) for lv in loopvars]
-    ex = gen_tiled(loopvars, tilevars, tilesizesym, pre, body)
+    # Create variables to hold the value of the tilesize.
+    # We could have hard-coded these sizes, but using a variable makes it easier to
+    # write code to loop over different settings (as in @test_tile).
+    tilesizesym = [symbol("_kt_tsz_"*string(tv)) for tv in tilevars]
+    ex = gen_tiled(tilevars, outervars, tilesizesym, pre, body)
+    # Set the tilesize variables to those specified in the tuple provided by the user.
     settilesize = Expr(:block, Any[:($(esc(tilesizesym[i])) = $(tilesize[i])) for i = 1:length(tilesize)]...)
-#     settilesize = Expr(:block, Any[:($(tilesizesym[i]) = $(tilesize[i])) for i = 1:length(tilesize)]...)
     return quote
         $settilesize
         $ex
     end
 end
 
-# Thoughts: should use more Dicts to make this easier?
-function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
-    initblocks = Any[]  # These will allocate temporaries used on a per-tile basis
-    preblocks = Any[]   # These run at the beginning of working on each tile
-    innervars = [symbol("_kt_inner_"*string(lv)) for lv in loopvars]
+function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
+    initblocks = Any[]  # Statements to allocate temporaries used on a per-tile basis
+    preblocks = Any[]   # Statements that run at the beginning of working on each tile
+    innervars = [symbol("_kt_inner_"*string(tv)) for tv in tilevars]
     # Look for the initial "for" statement. It might be buried inside @loophoist
     body = copy(body)
-    bodymod = body  # points to the head of the "real" expression
+    bodymod = body  # will point to the head of the "real" body expression
     if bodymod.head == :block
         bodymod = Base.is_linenumber(bodymod.args[1]) ? bodymod.args[2] : bodymod.args[1]
     end
     if is_macrocall(bodymod, :KernelTools, symbol("@loophoist"))
         bodymod = bodymod.args[2]
     end
-    @assert bodymod.head == :for
+    if bodymod.head != :for
+        error("@tile requires that the body expression starts with a for loop; got ", bodymod)
+    end
+    # Extract all loop variables and their ranges (even those that we're not tiling over)
     looprangeexpr = bodymod.args[1]
-    looprangedict = Dict{Symbol,Any}()
+    looprangedict = Dict{Symbol,Any}()    # might be an expression, :(1:5), or a symbol, :inner_x
     if looprangeexpr.head == :block
+        # A multidimensional loop
         for ex in looprangeexpr.args
-            looprangedict[ex.args[1]] = ex.args[2]
+            looprangedict[ex.args[1]::Symbol] = copy(ex.args[2])
         end
     else
-        looprangedict[looprangeexpr.args[1]] = looprangeexpr.args[2]
+        # A single-variable loop
+        looprangedict[looprangeexpr.args[1]::Symbol] = copy(looprangeexpr.args[2])
     end
+    # Check that the tiled variables are a subset of the loop variables
+    for tv in tilevars
+        if !haskey(looprangedict, tv)
+            error("Tile variables must be loop variables; did not find ", tv)
+        end
+    end
+
     # Handle any tilewise temporaries
     if pre != nothing
         ## Infer the sizes of the temporaries
         # Extract all references, and determine which temporaries will be needed
-        tmpnames = assignments(pre)  # these are the temporary arrays we'll want
+        tmpnames = assignments(pre)  # these are the temporary arrays we'll need
         refs = refexprs(pre, skiplhs=true)
         refexprs!(refs, body)        # refs contains exprs for all :ref expressions, other than setindex! statements in pre
-        # Gather all :ref expressions for the same array
-        byarray = Dict()
+        # Gather all indexes used for a given array
+        # If A is used as A[x,y] and A[x+1,y], then
+        #   indexes_by_array[:A] == Vector{Any}[[:x,:y], [:(x+1),:y]]
+        indexes_by_array = Dict{Symbol,Vector{Vector{Any}}}()
         for r in refs
             arraysym = r.args[1]
             indexes = r.args[2:end]
-            if !haskey(byarray, arraysym)
-                byarray[arraysym] = Any[indexes]
-            else
-                push!(byarray[arraysym], indexes)
+            if !haskey(indexes_by_array, arraysym)
+                indexes_by_array[arraysym] = Vector{Vector{Any}}()
             end
+            push!(indexes_by_array[arraysym], indexes)
         end
-        # Compute bounds for each temporary
-        offsetsyms = Any[]
-        sizesyms = Any[]
-        lastsyms = Any[]
-        boundsblock = Any[]
-        for (arrayname, indexes) in byarray
+        # From the set of indexing operations, compute bounds for each temporary.
+        # This includes what are usually called "ghost cells" beyond the edges of tiles, so
+        # that expressions like (tmparray[x-1] + tmparray[x+1]) will be in-bounds.
+        # Temporaries will be indexed with x = innervar + offset, where innervar starts at 0.
+        # The offset compensates for the smallest index in the stencil.
+        offsetsyms = Any[]    # Names of variables holding the offsets for each temporary
+        sizesyms = Any[]      # Names of variables holding the sizes of each temporary
+        lastsyms = Any[]      # Names of variables holding the largest value of (outer+inner) along each axis
+                              # at which the temporary needs to be initialized.
+                              # (if tmp[x] = A[x] and out[x] = tmp[x]+tmp[x+1], we need to evaluate
+                              #  tmp at one higher x than the range used for out)
+        boundsblock = Any[]   # Statements needed to compute the bounds
+        for (arrayname, indexes) in indexes_by_array
             if !in(arrayname, tmpnames)
                 continue
             end
-            osyms, ssyms, lsyms = constructbounds!(boundsblock, arrayname, indexes, loopvars, tilesizesym)
+            osyms, ssyms, lsyms = constructbounds!(boundsblock, arrayname, indexes, tilevars, tilesizesym, looprangedict)
             push!(offsetsyms, osyms)
             push!(sizesyms, ssyms)
             push!(lastsyms, lsyms)
@@ -294,14 +316,14 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
         # Annotate the bounds computation so future analysis will know what this is about
         push!(initblocks, Expr(:block, esc(:(KT_BOUNDSCOMP_BLOCK = 1)), boundsblock...))
         # Allocate the temporaries. Now that we have the sizes, the only problem left is the types.
-        # We'll compute an element of each temporary and use typeof.
+        # We'll compute one element of each temporary and use typeof.
         allocblock = Any[]
         for (i,Asym) in enumerate(tmpnames)
             # Find the first statement in pre that defines each temporary
             ex, _ = assignmentexpr(pre, Asym)
             # Change all indexes on the RHS to offsets. This is a safe place to evaluate it
-            outfirst = [:(first($(looprangedict[lv]))) for lv in loopvars]
-            ex1 = tileindex(ex.args[2], loopvars, outfirst, zeros(Int, length(loopvars)), tmpnames, offsetsyms[i])
+            outfirst = [:(first($(looprangedict[tv]))) for tv in tilevars]
+            ex1 = tileindex(ex.args[2], tilevars, outfirst, zeros(Int, length(tilevars)), tmpnames, offsetsyms[i])
             push!(allocblock, esc(:($Asym = Array(typeof($ex1), $(sizesyms[i]...)))))
         end
         push!(initblocks, Expr(:block, esc(:(KT_ALLOC_BLOCK = 1)), allocblock...))
@@ -311,17 +333,17 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
             osyms = offsetsyms[i]
             ssyms = sizesyms[i]
             lsyms = lastsyms[i]
-            lv = ex.args[1].args[2:end]  # the local loopvars used for this temporary
-            keep = indexin(loopvars, lv) .> 0
-            sum(keep) == length(lv) || error("Pre expressions must use the same indexing variables as the overall loop")
-            lv, ov, iv = loopvars[keep], outervars[keep], innervars[keep]
-            loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), last($(looprangedict[lv[d]]))-$(ov[d])+$(lsyms[d])))) for d = 1:length(iv)]
-            push!(preblocks, Expr(:for, Expr(:block, loopranges...), tileindex(esc(ex), lv, ov, iv, tmpnames, offsetsyms)))
+            tv = ex.args[1].args[2:end]  # the local tilevars used for initializing this temporary
+            keep = indexin(tilevars, tv) .> 0
+            sum(keep) == length(tv) || error("Pre expressions must use the same indexing variables as the overall loop")
+            tv, ov, iv = tilevars[keep], outervars[keep], innervars[keep]
+            loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), $(lsyms[d])-$(ov[d])))) for d = 1:length(iv)]
+            push!(preblocks, Expr(:for, Expr(:block, loopranges...), tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)))
         end
         # Replace the body indexing to be tile-specific
-        bodymod.args[2] = tileindex(bodymod.args[2], loopvars, outervars, innervars, tmpnames, offsetsyms)
+        bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, tmpnames, offsetsyms)
     else
-        bodymod.args[2] = tileindex(bodymod.args[2], loopvars, outervars, innervars, Symbol[], [])
+        bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, Symbol[], [])
     end
     # Create the outer loop nest and modify the inner loop nest to just iterate over a tile
     loopranges = Expr[]
@@ -348,48 +370,67 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     if !isempty(preblocks)
         body = Expr(:block, Expr(:block, esc(:(KT_TILEWISE_BLOCK = 1)), preblocks...), body)
     end
-    push!(block, Expr(:for, Expr(:block, loopranges...), body))
+    push!(block, Expr(:for, Expr(:block, outerlooprangeexprs...), body))
     Expr(:block, block...)
 end
 
-# On output, stmnts will have the expressions needed to compute the size parameters (offset, size) of the given
+# On output, stmnts will have the expressions needed to compute the size parameters (offset, size, last) of the given
 # temporary array.
-function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, loopvars, tilesizesym)
+# See more detailed description of the outputs above in the call to constructbounds!
+function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, tilevars, tilesizesym, looprangedict)
     nd = length(indexes[1])
     if !all(x->length(x) == nd, indexes)
         error("indexes are not all of the same dimensionality: $indexes")
     end
     # Parse all indexing operations on the temporary
-    indexexprs = [Any[] for d = 1:nd]
+    indexexprs = [Any[] for d = 1:nd]  # Indexing expressions evaluated at first&last indexes of a tile
+    lastexprs = [Any[] for d = 1:nd]    # Used for the final tile along an axis
     for I in indexes
         for d = 1:nd
             ind = AffineIndex(I[d])
-            push!(indexexprs[d], ind.offset)   # when the inner tile variable is at min (0)
-            varindex = indexin_scalar(ind.sym, loopvars)
-            if varindex != 0
+            tvindex = indexin_scalar(ind.sym, tilevars)
+            rng = looprangedict[ind.sym]
+            if tvindex != 0
+                # when the inner tile variable is at min (0)
+                push!(indexexprs[d], ind.offset)
                 # when the inner tile variable is at max (tilesizesym-1)
-                push!(indexexprs[d], :($(ind.coeff) * ($(tilesizesym[varindex])-1) + $(ind.offset)))
+                push!(indexexprs[d], :($(ind.coeff) * ($(tilesizesym[tvindex])-1) + $(ind.offset)))
+            else
+                # It's not a variable we're tiling over, so use the whole range
+                push!(indexexprs[d], :(first($rng)))
+                push!(indexexprs[d], :(last($rng)))
             end
+            push!(lastexprs[d], :($(ind.coeff) * last($rng) + $(ind.offset)))
         end
     end
-    # Compute offset and size expressions
+    # Add statements that compute the offset and size expressions
     offsetsyms = Array(Symbol, nd)
     sizesyms = Array(Symbol, nd)
-    lastsyms = Array(Symbol, nd)  # last tile: how much extra is needed beyond last(rng)-outer
+    lastsyms = Array(Symbol, nd)
+    toshow = get(KT_DEBUG, :bounds, false)
     for d = 1:nd
         tag = string(arrayname)*"_"*string(d)
+        # The offset is computed in terms of the minimum value of all indexing operations
         offsetsym = symbol("_kt_offset_"*tag)
         expr = Expr(:call, :min, indexexprs[d]...)
         push!(stmnts, esc(:($offsetsym = 1 - $expr)))
         sizesym = symbol("_kt_size_"*tag)
         lastsym = symbol("_kt_last_"*tag)
+        # The size is computed in terms of the maximum value of all indexing operations
         expr = copy(expr)
         expr.args[1] = :max
         push!(stmnts, esc(:($sizesym = $offsetsym + $expr)))
-        push!(stmnts, esc(:($lastsym = $sizesym - $(tilesizesym[d]) - $offsetsym + 1)))
+        # The lastvalue is the maximum of all statements at total loop edges
+        expr = length(lastexprs[d]) > 1 ? Expr(:call, :max, lastexprs[d]...) : lastexprs[d][1]
+        push!(stmnts, esc(:($lastsym = $expr)))
         offsetsyms[d] = offsetsym
         sizesyms[d] = sizesym
         lastsyms[d] = lastsym
+        if toshow
+            push!(stmnts, :(@show $offsetsym))
+            push!(stmnts, :(@show $sizesym))
+            push!(stmnts, :(@show $lastsym))
+        end
     end
     offsetsyms, sizesyms, lastsyms
 end
@@ -463,67 +504,67 @@ refexprs!(refs, s; skiplhs=false) = refs
 # Convert untiled indexing statements to tiled indexing statements
 # For arrays that cover the whole domain, i -> i_outer + i_inner
 # For temporary arrays defined just on a tile, i -> i_inner + array_i_offset
-# Note that the pattern-matching is based on loopvars and tmpnames, and everything
+# Note that the pattern-matching is based on tilevars and tmpnames, and everything
 # else is based on the position (i.e., index) within outervars/innervars/offsetsyms.
-function tileindex(ex::Expr, loopvars, outervars, innervars, tmpnames, offsetsyms)
-    domainexprs = [:($(outervars[i]) + $(innervars[i]))  for i = 1:length(loopvars)]
-    exout = tileindex!(copy(ex), loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+function tileindex(ex::Expr, tilevars, outervars, innervars, tmpnames, offsetsyms)
+    domainexprs = [:($(outervars[i]) + $(innervars[i]))  for i = 1:length(tilevars)]
+    exout = tileindex!(copy(ex), tilevars, domainexprs, innervars, tmpnames, offsetsyms)
     exout
 end
 
-function tileindex!(ex::Expr, loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+function tileindex!(ex::Expr, tilevars, domainexprs, innervars, tmpnames, offsetsyms)
     if ex.head == :ref
         sym = ex.args[1]
         ind = indexin_scalar(sym, tmpnames)
         if ind > 0
             osyms = offsetsyms[ind]
             for i = 2:length(ex.args)
-                ex.args[i] = replaceindex!(ex.args[i], loopvars, innervars, osyms[i-1])
+                ex.args[i] = replaceindex!(ex.args[i], tilevars, innervars, osyms[i-1])
             end
         else
             for i = 2:length(ex.args)
-                ex.args[i] = replaceindex!(ex.args[i], loopvars, domainexprs)
+                ex.args[i] = replaceindex!(ex.args[i], tilevars, domainexprs)
             end
         end
     end
     for i = 1:length(ex.args)
         if isa(ex.args[i], Expr)
-            tileindex!(ex.args[i]::Expr, loopvars, domainexprs, innervars, tmpnames, offsetsyms)
+            tileindex!(ex.args[i]::Expr, tilevars, domainexprs, innervars, tmpnames, offsetsyms)
         elseif isa(ex.args[i], Symbol)
             s = ex.args[i]::Symbol
-            ind = indexin_scalar(s, loopvars)
+            ind = indexin_scalar(s, tilevars)
             ex.args[i] = ind > 0 ? domainexprs[ind] : s
         end
     end
     ex
 end
 
-replaceindex!(arg, loopvars, replacevars) = arg
-function replaceindex!(s::Symbol, loopvars, replacevars)
-    ind = indexin_scalar(s, loopvars)
+replaceindex!(arg, tilevars, replacevars) = arg
+function replaceindex!(s::Symbol, tilevars, replacevars)
+    ind = indexin_scalar(s, tilevars)
     if ind > 0
         return replacevars[ind]
     end
     s
 end
-function replaceindex!(ex::Expr, loopvars, replacevars)
+function replaceindex!(ex::Expr, tilevars, replacevars)
     for i = 1:length(ex.args)
-        ex.args[i] = replaceindex!(ex.args[i], loopvars, replacevars)
+        ex.args[i] = replaceindex!(ex.args[i], tilevars, replacevars)
     end
     ex
 end
-replaceindex!(arg, loopvars, replacevars, offset::Symbol) = arg
-function replaceindex!(s::Symbol, loopvars, replacevars, offset::Symbol)
-    ind = indexin_scalar(s, loopvars)
+replaceindex!(arg, tilevars, replacevars, offset::Symbol) = arg
+function replaceindex!(s::Symbol, tilevars, replacevars, offset::Symbol)
+    ind = indexin_scalar(s, tilevars)
     if ind > 0
         return :($(replacevars[ind]) + $offset)
     end
 #     :($s + $offset)
     s
 end
-function replaceindex!(ex::Expr, loopvars, replacevars, offset::Symbol)
+function replaceindex!(ex::Expr, tilevars, replacevars, offset::Symbol)
     for i = 1:length(ex.args)
-        ex.args[i] = replaceindex!(ex.args[i], loopvars, replacevars, offset)
+        ex.args[i] = replaceindex!(ex.args[i], tilevars, replacevars, offset)
     end
     ex
 end
