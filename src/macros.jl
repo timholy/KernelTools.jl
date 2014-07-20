@@ -275,14 +275,16 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
         # Compute bounds for each temporary
         offsetsyms = Any[]
         sizesyms = Any[]
+        lastsyms = Any[]
         boundsblock = Any[]
         for (arrayname, indexes) in byarray
             if !in(arrayname, tmpnames)
                 continue
             end
-            osyms, ssyms = constructbounds!(boundsblock, arrayname, indexes, loopvars, tilesizesym)
+            osyms, ssyms, lsyms = constructbounds!(boundsblock, arrayname, indexes, loopvars, tilesizesym)
             push!(offsetsyms, osyms)
             push!(sizesyms, ssyms)
+            push!(lastsyms, lsyms)
         end
         # Annotate the bounds computation so future analysis will know what this is about
         push!(initblocks, Expr(:block, esc(:(KT_BOUNDSCOMP_BLOCK = 1)), boundsblock...))
@@ -303,11 +305,12 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
             ex, _ = assignmentexpr(pre, Asym)
             osyms = offsetsyms[i]
             ssyms = sizesyms[i]
+            lsyms = lastsyms[i]
             lv = ex.args[1].args[2:end]  # the local loopvars used for this temporary
             keep = indexin(loopvars, lv) .> 0
             sum(keep) == length(lv) || error("Pre expressions must use the same indexing variables as the overall loop")
             lv, ov, iv = loopvars[keep], outervars[keep], innervars[keep]
-            loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), last($(looprangedict[lv[d]]))-$(ov[d])))) for d = 1:length(iv)]
+            loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), last($(looprangedict[lv[d]]))-$(ov[d])+$(lsyms[d])))) for d = 1:length(iv)]
             push!(preblocks, Expr(:for, Expr(:block, loopranges...), tileindex(esc(ex), lv, ov, iv, tmpnames, offsetsyms)))
         end
         # Replace the body indexing to be tile-specific
@@ -344,7 +347,8 @@ function gen_tiled(loopvars, outervars, tilesizesym, pre, body::Expr)
     Expr(:block, block...)
 end
 
-# On output, stmnts will have the expressions needed to compute the size parameters (offset, size) of the given array
+# On output, stmnts will have the expressions needed to compute the size parameters (offset, size) of the given
+# temporary array.
 function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, loopvars, tilesizesym)
     nd = length(indexes[1])
     if !all(x->length(x) == nd, indexes)
@@ -355,10 +359,10 @@ function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, loopvars, til
     for I in indexes
         for d = 1:nd
             ind = AffineIndex(I[d])
-            push!(indexexprs[d], ind.offset)   # when the inner tile variable is 0
+            push!(indexexprs[d], ind.offset)   # when the inner tile variable is at min (0)
             varindex = indexin_scalar(ind.sym, loopvars)
             if varindex != 0
-                # when the inner tile variable is tilesizesym-1
+                # when the inner tile variable is at max (tilesizesym-1)
                 push!(indexexprs[d], :($(ind.coeff) * ($(tilesizesym[varindex])-1) + $(ind.offset)))
             end
         end
@@ -366,18 +370,23 @@ function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, loopvars, til
     # Compute offset and size expressions
     offsetsyms = Array(Symbol, nd)
     sizesyms = Array(Symbol, nd)
+    lastsyms = Array(Symbol, nd)  # last tile: how much extra is needed beyond last(rng)-outer
     for d = 1:nd
-        offsetsym = symbol("_kt_offset_"*string(arrayname)*"_"*string(d))
+        tag = string(arrayname)*"_"*string(d)
+        offsetsym = symbol("_kt_offset_"*tag)
         expr = Expr(:call, :min, indexexprs[d]...)
         push!(stmnts, esc(:($offsetsym = 1 - $expr)))
-        sizesym = symbol("_kt_size_"*string(arrayname)*"_"*string(d))
+        sizesym = symbol("_kt_size_"*tag)
+        lastsym = symbol("_kt_last_"*tag)
         expr = copy(expr)
         expr.args[1] = :max
         push!(stmnts, esc(:($sizesym = $offsetsym + $expr)))
+        push!(stmnts, esc(:($lastsym = $sizesym - $(tilesizesym[d]) - $offsetsym + 1)))
         offsetsyms[d] = offsetsym
         sizesyms[d] = sizesym
+        lastsyms[d] = lastsym
     end
-    offsetsyms, sizesyms
+    offsetsyms, sizesyms, lastsyms
 end
 
 # Get the symbol associated with assignment statements, e.g., in :(A[5] = 7) return :A
