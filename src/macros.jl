@@ -442,9 +442,9 @@ function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, tilevars, til
         sizesyms[d] = sizesym
         lastsyms[d] = lastsym
         if toshow
-            push!(stmnts, :(@show $offsetsym))
-            push!(stmnts, :(@show $sizesym))
-            push!(stmnts, :(@show $lastsym))
+            push!(stmnts, esc(:(@show $offsetsym)))
+            push!(stmnts, esc(:(@show $sizesym)))
+            push!(stmnts, esc(:(@show $lastsym)))
         end
     end
     offsetsyms, sizesyms, lastsyms
