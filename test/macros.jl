@@ -1,6 +1,8 @@
 import KernelTools
 using Base.Test
 
+#### Testing the utility functions
+
 # Convenience function for testing equality of expressions
 # Strip line numbers, extraneous :block wrappers, and :escape expressions
 
@@ -78,29 +80,44 @@ ex = KernelTools.gen_hoisted(:(s += A[j]), [:j, :i], [:(1:size(A,2)),:(1:size(A,
     # inner indexes ii take values in 0:(ti-1)
     # A statement like A[i] will get turned into A[offset+ii], and A[i-1] into A[offset+ii-1]
     # compute the offset and size of A needed to be able to execute all indexing statements without bounds errors
+looprangedict = [:i => :(1:size(A,1)), :j => :(1:size(A,2))]
 # A[i]
 stmnts = Any[]
-offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti], looprangedict)
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
 # A[i-1]
 stmnts = Any[]
-offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti], looprangedict)
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
 # A[i-1] and A[i+1]
 stmnts = Any[]
-offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti], looprangedict)
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
 # A[i+1,j] and A[i,j+1]
 stmnts = Any[]
-offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj])
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj], looprangedict)
 @test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
 @test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
 @test stripexpr(stmnts[4]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 @test stripexpr(stmnts[5]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+# Tiling just j for A[i,j]
+stmnts = Any[]
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i,:j]], [:j], [:tj], looprangedict)
+@test stripexpr(stmnts[3]) == :($(lastsyms[1]) = 1*last($(looprangedict[:i])) + 0)
+@test stripexpr(stmnts[6]) == :($(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
+# Tiling just j for A[i+1,j]
+stmnts = Any[]
+offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j]], [:j], [:tj], looprangedict)
+@test stripexpr(stmnts[3]) == :($(lastsyms[1]) = 1*last($(looprangedict[:i])) + 1)
+@test stripexpr(stmnts[6]) == :($(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
 
+
+##### Tests of the macros
+
+# Reductions & hoising
 A = rand(3,5)
 A1 = sum(A, 2)
 A2 = sum(A, 1)
@@ -115,6 +132,25 @@ end
 @test A1c == A1
 @test A2c == A2
 
+# Tiling
+A = zeros(Int, 5, 6)
+KernelTools.@tile (i,4,j,4) begin
+    for j = 1:size(A,2), i = 1:size(A,1)
+        A[i,j] = i + (j-1)*size(A,1)
+    end
+end
+@test A == reshape(1:length(A), size(A))
+
+# Tiling over a subset of variables
+A = zeros(Int, 5, 6)
+KernelTools.@tile (j,4) begin
+    for j = 1:size(A,2), i = 1:size(A,1)
+        A[i,j] = i + (j-1)*size(A,1)
+    end
+end
+@test A == reshape(1:length(A), size(A))
+
+## Tiling matrix multiplication
 M = 8
 K = 9
 N = 7
