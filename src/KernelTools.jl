@@ -10,5 +10,6 @@ end
 
 include("edge.jl")
 include("macros.jl")
+include("macroexpand.jl")
 
 end # module
