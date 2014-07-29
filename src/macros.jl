@@ -341,9 +341,9 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             ssyms = sizesyms[i]
             lsyms = lastsyms[i]
             tv = ex.args[1].args[2:end]  # the local tilevars used for initializing this temporary
-            keep = indexin(tilevars, tv) .> 0
-            sum(keep) == length(tv) || error("Pre expressions must use the same indexing variables as the overall loop")
-            tv, ov, iv = tilevars[keep], outervars[keep], innervars[keep]
+            ind = indexin(tv, tilevars)
+            any(ind.==0) && error("Pre expressions must use the same indexing variables as the overall loop")
+            ov, iv = outervars[ind], innervars[ind]
             loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), $(lsyms[d])-$(ov[d])))) for d = 1:length(iv)]
             initbody = tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)
             if get(KT_DEBUG, :preindex, false)
@@ -360,6 +360,7 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
     # Create the outer loop nest and modify the inner loop nest to iterate over a tile
     outerlooprangeexprs = Expr[]
     innerlooprangeexprs = bodymod.args[1].head == :block ? bodymod.args[1].args : [bodymod.args[1]]
+    outerorder = Symbol[]
     for i = 1:length(innerlooprangeexprs)
         ex = innerlooprangeexprs[i]
         lv = ex.args[1]
@@ -367,9 +368,12 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
         if ind > 0
             rng = looprangedict[lv]
             push!(outerlooprangeexprs, tilerange(outervars[ind], tilesizesym[ind], rng))
+            push!(outerorder, lv)
             innerlooprangeexprs[i] = :($(innervars[ind]) = 0:min($(tilesizesym[ind])-1,last($rng)-$(outervars[ind])))
         end
     end
+    p = sortperm(indexin(outerorder, tilevars))  # put in order specified by user
+    outerlooprangeexprs = outerlooprangeexprs[p]
     # Create the final expression
     block = Any[]
     if !isempty(initblocks)
