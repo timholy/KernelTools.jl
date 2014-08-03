@@ -41,16 +41,18 @@
 # is supposed to a separate step? Make need @tile_thread? Or, any allocations that come
 # before the for loop could be interpreted as needing to be done once for each thread.
 
+
+
+# Debugging: show useful information. Recognized settings:
+#    :inferredbounds    Shows the sizes and offsets of temporaries
+#    :tileindex         Shows the current outer tile variable values
+#    :bodyindex         Shows (outer, inner) iteration variables in the body
+#    :preindex          Shows (outer, inner) iteration variables in the pre-expression(s)
 const KT_DEBUG = Dict{Symbol, Any}()
 function setdebug(sym::Symbol, val)
     global KT_DEBUG
     KT_DEBUG[sym] = val
 end
-# Recognized settings:
-#    :inferredbounds    Shows the sizes and offsets of temporaries
-#    :tileindex         Shows the current outer tile variable values
-#    :bodyindex         Shows (outer, inner) iteration variables in the body
-#    :preindex          Shows (outer, inner) iteration variables in the pre-expression(s)
 
 ### loop ordering & hoisting
 macro test_looporder(ex)
