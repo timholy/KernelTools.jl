@@ -338,11 +338,12 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
         # Initialize each temporary
         for (i,Asym) in enumerate(tmpnames)
             # Here's a design problem: what about temporaries that take more than one line to compute?
-            ex, _ = assignmentexpr(pre, Asym)  # find the expression for calculating the chosen temporary
+            ex = assignmentblock(pre, Asym)  # find the expression for calculating the chosen temporary
+            exa, _ = assignmentexpr(ex, Asym)
             osyms = offsetsyms[i]
             ssyms = sizesyms[i]
             lsyms = lastsyms[i]
-            tv = ex.args[1].args[2:end]  # the local tilevars used for initializing this temporary
+            tv = exa.args[1].args[2:end]  # the local tilevars used for initializing this temporary
             ind = indexin(tv, tilevars)
             any(ind.==0) && error("Pre expressions must use the same indexing variables as the overall loop")
             ov, iv = outervars[ind], innervars[ind]
@@ -477,6 +478,20 @@ end
 assignments!(asgn, a) = asgn
 
 # Get the expression that first assigns a particular array symbol
+function assignmentblock(ex::Expr, Asym::Symbol)
+    if ex.head == :block
+        args = ex.args
+        for a in args
+            _, found = assignmentexpr(a)
+            if found
+                return a
+            end
+        end
+        error("Not found")
+    end
+    ex
+end
+
 function assignmentexpr(ex::Expr, Asym::Symbol)
     if in(ex.head, (:(=), :(+=), :(-=), :(*=), :(/=)))
         if isa(ex.args[1], Expr)
