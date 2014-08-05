@@ -6,33 +6,7 @@
 #   automatic bounds-checking?
 #   writing generated code to an executable file
 
-# reordering: @test_looporder and @loophoist (the latter for being after you've settled on a looporder).
 # add?: @test_looporder_simd and @loophoist_simd
-
-# tiling API:
-#    @tile tilesizes loopnest
-#    @tile tilesizes pre loopnest
-# e.g.,
-#    @tile (m,256,k,16,n,16) (Bt[n,k] = B[k,n]) begin
-#         @loophoist for n = 1:N,  k = 1:K, m = 1:M
-#             C[m,n] += A[m,k] * Bt[n,k]
-#         end
-#     end
-# and
-#    @tile((x,256,y,16), (blur_y[x,y] = A[x,y-1]+A[x,y]+A[x,y+1]) begin
-#         for y = interior_y, x = interior_x
-#             blur_xy[x,y] = (1.0/9)*(blur_y[x-1,y] + blur_y[x,y] + blur_y[x+1,y])
-#         end
-#     end
-# Need to support:
-#    pre-expression: automatic computation of the size of Bt, auto-generation of the necessary loops
-#    @test_tile, a syntax that runs & times the computation for many different tile sizes
-# Alternative syntax:
-#    @tile (m,mo,256,k,ko,16,n,no,16) (Bt[n,k] = B[k,n]) begin
-# This should allow you to combine this with
-#    @test_looporder @tile (...)
-# and
-#    @thread (mo, no) @tile (...)
 #
 # Parallelization:
 #    @thread n for n = 1:size(A,2), ...
@@ -369,7 +343,8 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             any(ind.==0) && error("Pre expressions must use the same indexing variables as the overall loop")
             ov, iv = outervars[ind], innervars[ind]
             loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), $(lsyms[d])-$(ov[d])))) for d = 1:length(iv)]
-            indswap = indexin(indexin(tv, outerorder), ind)
+            indswap = indexin(outerorder, tv)
+            indswap = indswap[indswap .> 0]
             loopranges = loopranges[indswap]
             initbody = tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)
             if get(KT_DEBUG, :preindex, false)
