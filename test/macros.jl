@@ -84,35 +84,35 @@ looprangedict = [:i => :(1:size(A,1)), :j => :(1:size(A,2))]
 # A[i]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i]], [:i], [:ti], looprangedict)
-@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
-@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
+@test stripexpr(stmnts[1]) == :(const $(offsetsyms[1]) = 1 - min(0, 1*(ti-1)+0))  # ultimately, this will evaluate to 1
+@test stripexpr(stmnts[2]) == :(const $(sizesyms[1]) = $(offsetsyms[1]) + max(0, 1*(ti-1)+0))  # ultimately, this will evaluate to ti
 # A[i-1]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)]], [:i], [:ti], looprangedict)
-@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
-@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
+@test stripexpr(stmnts[1]) == :(const $(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to 2
+@test stripexpr(stmnts[2]) == :(const $(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1)))  # ultimately, this will evaluate to ti
 # A[i-1] and A[i+1]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i-1)],[:(i+1)]], [:i], [:ti], looprangedict)
-@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
-@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
+@test stripexpr(stmnts[1]) == :(const $(offsetsyms[1]) = 1 - min(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to 2
+@test stripexpr(stmnts[2]) == :(const $(sizesyms[1]) = $(offsetsyms[1]) + max(-1, 1*(ti-1)+(-1), 1, 1*(ti-1)+1))  # ultimately, this will evaluate to ti+2
 # A[i+1,j] and A[i,j+1]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j],[:i,:(j+1)]], [:i,:j], [:ti,:tj], looprangedict)
-@test stripexpr(stmnts[1]) == :($(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
-@test stripexpr(stmnts[2]) == :($(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
-@test stripexpr(stmnts[4]) == :($(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
-@test stripexpr(stmnts[5]) == :($(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[1]) == :(const $(offsetsyms[1]) = 1 - min(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
+@test stripexpr(stmnts[2]) == :(const $(sizesyms[1]) = $(offsetsyms[1]) + max(1, 1*(ti-1)+1, 0, 1*(ti-1)+0))
+@test stripexpr(stmnts[4]) == :(const $(offsetsyms[2]) = 1 - min(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
+@test stripexpr(stmnts[5]) == :(const $(sizesyms[2]) = $(offsetsyms[2]) + max(0, 1*(tj-1)+0, 1, 1*(tj-1)+1))
 # Tiling just j for A[i,j]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:i,:j]], [:j], [:tj], looprangedict)
-@test stripexpr(stmnts[3]) == :($(lastsyms[1]) = 1*last($(looprangedict[:i])) + 0)
-@test stripexpr(stmnts[6]) == :($(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
+@test stripexpr(stmnts[3]) == :(const $(lastsyms[1]) = 1*last($(looprangedict[:i])) + 0)
+@test stripexpr(stmnts[6]) == :(const $(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
 # Tiling just j for A[i+1,j]
 stmnts = Any[]
 offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector{Any}[[:(i+1),:j]], [:j], [:tj], looprangedict)
-@test stripexpr(stmnts[3]) == :($(lastsyms[1]) = 1*last($(looprangedict[:i])) + 1)
-@test stripexpr(stmnts[6]) == :($(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
+@test stripexpr(stmnts[3]) == :(const $(lastsyms[1]) = 1*last($(looprangedict[:i])) + 1)
+@test stripexpr(stmnts[6]) == :(const $(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
 
 
 ##### Tests of the macros

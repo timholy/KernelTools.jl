@@ -238,7 +238,7 @@ function _tile(tilesettings, args...)
     tilesizesym = [symbol("_kt_tsz_"*string(tv)) for tv in tilevars]
     ex = gen_tiled(tilevars, outervars, tilesizesym, pre, body)
     # Set the tilesize variables to those specified in the tuple provided by the user.
-    settilesize = Expr(:block, Any[:($(esc(tilesizesym[i])) = $(tilesize[i])) for i = 1:length(tilesize)]...)
+    settilesize = Expr(:block, Any[:(const $(esc(tilesizesym[i])) = $(tilesize[i])) for i = 1:length(tilesize)]...)
     return quote
         $settilesize
         $ex
@@ -441,16 +441,16 @@ function constructbounds!(stmnts::Vector{Any}, arrayname, indexes, tilevars, til
         # The offset is computed in terms of the minimum value of all indexing operations
         offsetsym = symbol("_kt_offset_"*tag)
         expr = Expr(:call, :min, indexexprs[d]...)
-        push!(stmnts, esc(:($offsetsym = 1 - $expr)))
+        push!(stmnts, esc(:(const $offsetsym = 1 - $expr)))
         sizesym = symbol("_kt_size_"*tag)
         lastsym = symbol("_kt_last_"*tag)
         # The size is computed in terms of the maximum value of all indexing operations
         expr = copy(expr)
         expr.args[1] = :max
-        push!(stmnts, esc(:($sizesym = $offsetsym + $expr)))
+        push!(stmnts, esc(:(const $sizesym = $offsetsym + $expr)))
         # The lastvalue is the maximum of all statements at total loop edges
         expr = length(lastexprs[d]) > 1 ? Expr(:call, :max, lastexprs[d]...) : lastexprs[d][1]
-        push!(stmnts, esc(:($lastsym = $expr)))
+        push!(stmnts, esc(:(const $lastsym = $expr)))
         offsetsyms[d] = offsetsym
         sizesyms[d] = sizesym
         lastsyms[d] = lastsym
