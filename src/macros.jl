@@ -280,6 +280,24 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
         end
     end
 
+    # Create the outer loop nest and modify the inner loop nest to iterate over a tile
+    outerlooprangeexprs = Expr[]
+    innerlooprangeexprs = bodymod.args[1].head == :block ? bodymod.args[1].args : [bodymod.args[1]]
+    outerorder = Symbol[]
+    for i = 1:length(innerlooprangeexprs)
+        ex = innerlooprangeexprs[i]
+        lv = ex.args[1]
+        ind = indexin_scalar(lv, tilevars)
+        if ind > 0
+            rng = looprangedict[lv]
+            push!(outerlooprangeexprs, tilerange(outervars[ind], tilesizesym[ind], rng))
+            push!(outerorder, lv)
+            innerlooprangeexprs[i] = :($(innervars[ind]) = 0:min($(tilesizesym[ind])-1,last($rng)-$(outervars[ind])))
+        end
+    end
+    p = sortperm(indexin(outerorder, tilevars))  # put in order specified by user
+    outerlooprangeexprs = outerlooprangeexprs[p]
+
     # Handle any tilewise temporaries
     if pre != nothing
         ## Infer the sizes of the temporaries
@@ -348,6 +366,8 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             any(ind.==0) && error("Pre expressions must use the same indexing variables as the overall loop")
             ov, iv = outervars[ind], innervars[ind]
             loopranges = [esc(:($(iv[d]) = 1-$(osyms[d]):min($(ssyms[d])-$(osyms[d]), $(lsyms[d])-$(ov[d])))) for d = 1:length(iv)]
+            indswap = indexin(indexin(tv, outerorder), ind)
+            loopranges = loopranges[indswap]
             initbody = tileindex(esc(ex), tv, ov, iv, tmpnames, offsetsyms)
             if get(KT_DEBUG, :preindex, false)
                 initbody = Expr(:block, esc(Expr(:macrocall, symbol("@show"), Expr(:tuple, iv...))), initbody)
@@ -360,23 +380,6 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
     else
         bodymod.args[2] = tileindex(bodymod.args[2], tilevars, outervars, innervars, Symbol[], [])
     end
-    # Create the outer loop nest and modify the inner loop nest to iterate over a tile
-    outerlooprangeexprs = Expr[]
-    innerlooprangeexprs = bodymod.args[1].head == :block ? bodymod.args[1].args : [bodymod.args[1]]
-    outerorder = Symbol[]
-    for i = 1:length(innerlooprangeexprs)
-        ex = innerlooprangeexprs[i]
-        lv = ex.args[1]
-        ind = indexin_scalar(lv, tilevars)
-        if ind > 0
-            rng = looprangedict[lv]
-            push!(outerlooprangeexprs, tilerange(outervars[ind], tilesizesym[ind], rng))
-            push!(outerorder, lv)
-            innerlooprangeexprs[i] = :($(innervars[ind]) = 0:min($(tilesizesym[ind])-1,last($rng)-$(outervars[ind])))
-        end
-    end
-    p = sortperm(indexin(outerorder, tilevars))  # put in order specified by user
-    outerlooprangeexprs = outerlooprangeexprs[p]
     # Create the final expression
     block = Any[]
     if !isempty(initblocks)
