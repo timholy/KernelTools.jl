@@ -115,7 +115,59 @@ offsetsyms, sizesyms, lastsyms = KernelTools.constructbounds!(stmnts, :A, Vector
 @test stripexpr(stmnts[6]) == :(const $(lastsyms[2]) = 1*last($(looprangedict[:j])) + 0)
 
 
-##### Tests of the macros
+##### Loop ordering in @tile
+getlooporder(ex::Expr) = getlooporder!(Array(Vector{Symbol}, 0), ex)
+function getlooporder!(order, ex::Expr)
+    if ex.head == :for
+        loopvars = ex.args[1]
+        if isa(loopvars, Expr) && (loopvars::Expr).head == :block
+            newvars = Symbol[]
+            for exlv in (loopvars::Expr).args
+                push!(newvars, getloopvar(exlv))
+            end
+            push!(order, newvars)
+        else
+            push!(order, [getloopvar(loopvars)])
+        end
+        getlooporder!(order, ex.args[2])
+    else
+        for i = 1:length(ex.args)
+            if isa(ex.args[i], Expr)
+                getlooporder!(order, ex.args[i])
+            end
+        end
+    end
+    order
+end
+function getloopvar(ex::Expr)
+    ex.head == :(=) || error("Not an assignment expression")
+    ex.args[1]
+end
+
+order = getlooporder(macroexpand(quote
+        KernelTools.@tile (i,4) for i = 1:10 end
+    end))
+@test order == Vector{Symbol}[[:_kt_outer_i], [:_kt_inner_i]]
+order = getlooporder(macroexpand(quote
+        for j = 1:5
+            KernelTools.@tile (i,4) for i = 1:10 end
+        end
+    end))
+@test order == Vector{Symbol}[[:j],[:_kt_outer_i], [:_kt_inner_i]]
+order = getlooporder(macroexpand(quote
+            KernelTools.@tile (i,4) for j = 1:5, i = 1:10 end
+    end))
+@test order == Vector{Symbol}[[:_kt_outer_i], [:j, :_kt_inner_i]]
+order = getlooporder(macroexpand(quote
+            KernelTools.@tile (j,2,i,4) for j = 1:5, i = 1:10 end
+    end))
+@test order == Vector{Symbol}[[:_kt_outer_j,:_kt_outer_i], [:_kt_inner_j, :_kt_inner_i]]
+order = getlooporder(macroexpand(quote
+            KernelTools.@tile (i,4,j,2) for j = 1:5, i = 1:10 end
+    end))
+@test order == Vector{Symbol}[[:_kt_outer_i,:_kt_outer_j], [:_kt_inner_j, :_kt_inner_i]]
+
+##### Functional tests of the macros
 
 # Reductions & hoising
 A = rand(3,5)
