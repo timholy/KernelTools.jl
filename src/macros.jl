@@ -295,6 +295,9 @@ function gen_tiled(tilevars, outervars, tilesizesym, pre, body::Expr)
             innerlooprangeexprs[i] = :($(innervars[ind]) = 0:min($(tilesizesym[ind])-1,last($rng)-$(outervars[ind])))
         end
     end
+    if bodymod.args[1].head != :block
+        bodymod.args[1] = innerlooprangeexprs[1]
+    end
     p = sortperm(indexin(outerorder, tilevars))  # put in order specified by user
     outerlooprangeexprs = outerlooprangeexprs[p]
 
