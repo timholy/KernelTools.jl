@@ -1,9 +1,9 @@
 # Macros:
 #   reordering loops---done  (add @simd?)
-#   tiling
+#   tiling---done
 #   parallelization
 #   loop unrolling macro?
-#   automatic bounds-checking?
+#   automatic bounds-checking of inputs? the infrastructure is basically in place already
 #   writing generated code to an executable file
 
 # add?: @test_looporder_simd and @loophoist_simd
@@ -15,7 +15,7 @@
 # is supposed to a separate step? Make need @tile_thread? Or, any allocations that come
 # before the for loop could be interpreted as needing to be done once for each thread.
 
-
+const assignment_heads = (:(=), :(+=), :(-=), :(*=), :(/=))
 
 # Debugging: show useful information. Recognized settings:
 #    :inferredbounds    Shows the sizes and offsets of temporaries
@@ -29,6 +29,22 @@ function setdebug(sym::Symbol, val)
 end
 
 ### loop ordering & hoisting
+# In a loop nest like this:
+# for n = 1:N
+#     for m = 1:M
+#         for k = 1:K
+#             C[k, m, n] = A[m,n]*B[k]
+#         end
+#     end
+# end
+# the expression A[m, n] might be replaced by a stack-allocated variable `sym` assigned
+# prior to the k loop.
+type HoistInfo
+    sym::Symbol
+    loopstage::Int    # how many nestings deep at which the indexes are constant
+    isassignedto::Bool
+end
+
 macro test_looporder(ex)
     loopVars, loopRanges = extract_loopvars(ex)
     nvars = length(loopVars)
@@ -77,8 +93,9 @@ function gen_hoisted(body, loopvars, loopranges)
     # Ordering hoists by loopstage
     hoistex = collect(keys(hoisted))
     vals = collect(values(hoisted))
-    hoistsym = [v[1] for v in vals]
-    hoiststage = [v[2] for v in vals]
+    hoistsym = [v.sym for v in vals]
+    hoiststage = [v.loopstage for v in vals]
+    hoistassignedto = [v.isassignedto for v in vals]
     p = sortperm(hoiststage)
     hoistex = hoistex[p]
     hoistsym = hoistsym[p]
@@ -93,10 +110,11 @@ function gen_hoisted(body, loopvars, loopranges)
             end
         end
         while k > 0 && hoiststage[k] == ls-1
+            reassign = hoistassignedto[k] ? (:($(esc(hoistex[k])) = $(esc(hoistsym[k])))) : :nothing
             newbody = quote
                 $(esc(hoistsym[k])) = $(esc(hoistex[k]))
                 $newbody
-                $(esc(hoistex[k])) = $(esc(hoistsym[k]))
+                $reassign
             end
             k -= 1
         end
@@ -104,14 +122,16 @@ function gen_hoisted(body, loopvars, loopranges)
     newbody
 end
 
-hoist(body::Expr, varnames) = hoist!(Dict{Expr, (Symbol, Int)}(), copy(body), varnames)
-function hoist!(hoisted::Dict{Expr, (Symbol, Int)}, exex::Expr, varnames)
-    # This focuses on the arguments rather than the head expression, because we need to be able to replace
-    # expressions inside the container. One place where this will have trouble is if the top-level expression
+hoist(body::Expr, varnames) = hoist!(Dict{Expr, HoistInfo}(), copy(body), varnames)
+function hoist!(hoisted::Dict{Expr, HoistInfo}, exex::Expr, varnames)
+    # This examines the arguments rather than the head expression, because we need to be able to replace
+    # expressions inside the "container." One place where this will have trouble is if the top-level expression
     # is a single :ref expression, but that doesn't seem likely/useful in a real computation.
+    isassignment = in(exex.head, assignment_heads)
     for k = 1:length(exex.args)
-        ex = exex.args[k]
-        if isa(ex, Expr)
+        isassignedto = isassignment && k == 1
+        if isa(exex.args[k], Expr)
+            ex::Expr = exex.args[k]
             # Check inside ex
             hoist!(hoisted, ex, varnames)
             # Now check ex itself
@@ -123,10 +143,14 @@ function hoist!(hoisted::Dict{Expr, (Symbol, Int)}, exex::Expr, varnames)
                 if ls < length(varnames)
                     # We can hoist. But first check whether this expression is already in the list
                     if haskey(hoisted, ex)
-                        s = hoisted[ex][1]
+                        hinfo = hoisted[ex]
+                        s = hinfo.sym
+                        if isassignedto
+                            hinfo.isassignedto = isassignedto
+                        end
                     else
                         s = ktgensym()
-                        hoisted[ex] = (s, ls)
+                        hoisted[ex] = HoistInfo(s, ls, isassignedto)
                     end
                     exex.args[k] = s
                 end
@@ -442,7 +466,7 @@ end
 assignments(ex::Expr) = (asgn = Symbol[]; assignments!(asgn, ex))
 
 function assignments!(asgn, ex::Expr)
-    if in(ex.head, (:(=), :(+=), :(-=), :(*=), :(/=)))
+    if in(ex.head, assignment_heads)
         if isa(ex.args[1], Expr)
             a = ex.args[1]::Expr
             if a.head == :ref
@@ -474,7 +498,7 @@ function assignmentblock(ex::Expr, Asym::Symbol)
 end
 
 function assignmentexpr(ex::Expr, Asym::Symbol)
-    if in(ex.head, (:(=), :(+=), :(-=), :(*=), :(/=)))
+    if in(ex.head, assignment_heads)
         if isa(ex.args[1], Expr)
             a = ex.args[1]::Expr
             if a.head == :ref && a.args[1] == Asym
@@ -498,7 +522,7 @@ end
 refexprs(ex::Expr; skiplhs=false) = (refs = Expr[]; refexprs!(refs, ex, skiplhs=skiplhs))
 
 function refexprs!(refs, ex::Expr; skiplhs=false)
-    if in(ex.head, (:(=), :(+=), :(-=), :(*=), :(/=)))
+    if in(ex.head, assignment_heads)
         if isa(ex.args[1], Expr)
             a = ex.args[1]::Expr
             if !skiplhs && a.head == :ref

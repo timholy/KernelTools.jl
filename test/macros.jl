@@ -45,7 +45,7 @@ KernelTools.ktgensym_counter_reset()
 ex = KernelTools.gen_hoisted(:(s += A[i]), [:j, :i], [:(1:size(A,2)),:(1:size(A,1))])
 @test stripexpr(ex) == stripexpr(:(for j = 1:size(A,2) for i = 1:size(A,1) s += A[i] end end))
 ex = KernelTools.gen_hoisted(:(s += A[j]), [:j, :i], [:(1:size(A,2)),:(1:size(A,1))])
-@test stripexpr(ex) == stripexpr(:(for j = 1:size(A,2); _kt_1 = A[j]; for i = 1:size(A,1) s += _kt_1 end; A[j] = _kt_1; end))
+@test stripexpr(ex) == stripexpr(:(for j = 1:size(A,2); _kt_1 = A[j]; for i = 1:size(A,1) s += _kt_1 end; nothing; end))
 
 # Symbols associated with setindex!-like statements
 @test KernelTools.assignments(:(a = 5)) == Symbol[]
